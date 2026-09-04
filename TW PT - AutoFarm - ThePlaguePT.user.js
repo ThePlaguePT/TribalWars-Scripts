@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TW PT - AutoFarm - ThePlaguePT
 // @namespace    theplaguept.tw.autofarm
-// @version      1.3.35
+// @version      1.3.36
 // @description  Automação por rondas do Assistente de Saque do Tribal Wars.
 // @author       ThePlaguePT
 // @icon         https://i.imgur.com/JXzrSKy.jpeg
@@ -27,7 +27,7 @@
     const APP = Object.freeze({
         name: 'TW PT - AutoFarm - ThePlaguePT',
         shortName: 'TW PT - AutoFarm',
-        version: '1.3.35',
+        version: '1.3.36',
         id: 'twPtAutoFarm',
         buttonId: 'auto-farm-a-toggle',
         toolbarId: 'tp-theplaguept-script-bar',
@@ -2023,7 +2023,7 @@
         state.farmRunning = true;
         let task = null;
         let finishRequested = false;
-        let stopRoundRequested = false;
+        let changeVillageRequested = false;
         let pendingDelay = 0;
         let retryDelay = 0;
         try {
@@ -2034,8 +2034,11 @@
                 if (!outcome?.sent) {
                     task = null;
                     if (outcome?.noTroops) {
-                        markFarmModelExhausted(outcome.model);
-                        stopRoundRequested = true;
+                        if (shouldLeaveVillageAfterNoTroops(outcome.model)) {
+                            changeVillageRequested = true;
+                        } else {
+                            retryDelay = 50;
+                        }
                     } else if (outcome?.rateLimited) {
                         retryDelay = APP.commandRateWindowMs + APP.commandRateSafetyMs;
                     } else {
@@ -2064,8 +2067,11 @@
                         if (!outcome?.sent) {
                             task = null;
                             if (outcome?.noTroops) {
-                                markFarmModelExhausted(outcome.model);
-                                stopRoundRequested = true;
+                                if (shouldLeaveVillageAfterNoTroops(outcome.model)) {
+                                    changeVillageRequested = true;
+                                } else {
+                                    retryDelay = 50;
+                                }
                             } else if (outcome?.rateLimited) {
                                 retryDelay = APP.commandRateWindowMs + APP.commandRateSafetyMs;
                             } else {
@@ -2081,7 +2087,7 @@
             if (generation !== state.farmGeneration) return;
             state.farmRunning = false;
             if (automationCanRun() && state.ownsWorker) {
-                if (stopRoundRequested) beginRoundPause(ensureRunState());
+                if (changeVillageRequested) completeCurrentVillage(ensureRunState());
                 else if (finishRequested) finishRound();
                 else if (task) scheduleFarmStep(randomizedAttackDelay());
                 else scheduleFarmStep(
@@ -2228,6 +2234,11 @@
         ));
     }
 
+    function shouldLeaveVillageAfterNoTroops(model) {
+        const run = markFarmModelExhausted(model);
+        return !hasUsableFarmModel(run);
+    }
+
     function startSpyPhase(runValue) {
         const run = runValue || ensureRunState();
         if (!run.round.farmCompleted) {
@@ -2260,8 +2271,7 @@
             state.spyRunning = false;
             setSpyStatus(result?.noTroops ? 'Sem batedores' : 'Pronto');
             if (automationCanRun() && state.ownsWorker) {
-                if (result?.noTroops) beginRoundPause(ensureRunState());
-                else completeCurrentVillage(ensureRunState());
+                completeCurrentVillage(ensureRunState());
             }
         }).catch(error => {
             if (generation !== state.farmGeneration) return;
