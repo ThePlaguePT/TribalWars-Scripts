@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TW PT - AutoFarm - ThePlaguePT
 // @namespace    theplaguept.tw.autofarm
-// @version      1.3.36
+// @version      1.3.37
 // @description  Automação por rondas do Assistente de Saque do Tribal Wars.
 // @author       ThePlaguePT
 // @icon         https://i.imgur.com/JXzrSKy.jpeg
@@ -27,7 +27,7 @@
     const APP = Object.freeze({
         name: 'TW PT - AutoFarm - ThePlaguePT',
         shortName: 'TW PT - AutoFarm',
-        version: '1.3.36',
+        version: '1.3.37',
         id: 'twPtAutoFarm',
         buttonId: 'auto-farm-a-toggle',
         toolbarId: 'tp-theplaguept-script-bar',
@@ -3062,24 +3062,14 @@
     }
 
     function getFarmRows() {
-        const selector = [
-            '#plunder_list a.farm_icon_a',
-            '#plunder_list a.farm_icon_b',
-            '#plunder_list a.farm_icon_c',
-            '#am_widget_Farm a.farm_icon_a',
-            '#am_widget_Farm a.farm_icon_b',
-            '#am_widget_Farm a.farm_icon_c',
-        ].join(',');
-        const rows = [];
-        const seen = new Set();
-        document.querySelectorAll(selector).forEach(button => {
-            const row = button.closest('tr');
-            if (row && !seen.has(row)) {
-                seen.add(row);
-                rows.push(row);
-            }
-        });
-        return rows;
+        const list = document.querySelector('#plunder_list') || document.querySelector('#am_widget_Farm');
+        if (!list) return [];
+
+        // A ordem da tabela do jogo é a ordem da ronda. Recolher diretamente os
+        // <tr> evita que modelos, seletores ou estados locais reorganizem a fila.
+        return Array.from(list.querySelectorAll('tr')).filter(row => (
+            row.querySelector('a.farm_icon_a,a.farm_icon_b,a.farm_icon_c')
+        ));
     }
 
     function selectModelForRow(
@@ -3166,7 +3156,10 @@
         const gameCount = getGameActiveTargetCount(row);
         const localCount = getActiveTargetStatus(model, targetKey, config).count;
         return {
-            count: Math.max(localCount, gameCount === null ? 0 : gameCount),
+            // A lista acabou de ser recarregada no início da ronda e é a fonte
+            // autoritativa para o alvo. Uma previsão local antiga não pode fazer
+            // saltar uma linha que o jogo já mostra sem ataques em curso.
+            count: gameCount,
             gameCount,
             localCount,
         };
@@ -3199,8 +3192,12 @@
         descriptions.push(row.outerHTML);
 
         let maximum = null;
+        let activeMarkerSeen = false;
         descriptions.filter(Boolean).forEach(description => {
             const text = normalizeText(description);
+            if (/(?:ataques?|attacks?|angriffe?|attaques?)\s*(?:em curso|a decorrer|ativos?|active|running|in progress)/i.test(text)) {
+                activeMarkerSeen = true;
+            }
             const patterns = [
                 /(\d+)\s*(?:ataques?|attacks?|angriffe?|attaques?)\s*(?:em curso|a decorrer|ativos?|active|running|in progress)?/i,
                 /(?:ataques?|attacks?|angriffe?|attaques?)\s*(?:em curso|a decorrer|ativos?|active|running|in progress)?\s*[:=-]?\s*(\d+)/i,
@@ -3212,7 +3209,9 @@
                 if (Number.isFinite(count)) maximum = Math.max(maximum ?? 0, count);
             }
         });
-        return maximum;
+        // Alguns mundos apresentam apenas o ícone/descrição, sem o número.
+        // Nesse caso há pelo menos um ataque; sem marcador, a linha vale zero.
+        return maximum ?? (activeMarkerSeen ? 1 : 0);
     }
 
     function roundTargetCanSend(model, targetKey, config, row) {
