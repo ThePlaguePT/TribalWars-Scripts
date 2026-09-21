@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TW PT - Marcador de Aldeias no Mapa ThePlaguePT
 // @namespace    theplaguept.tw.map-marker
-// @version      2.5.20
+// @version      2.5.21
 // @description  Marca listas de coordenadas no mapa e no minimapa do Tribal Wars.
 // @author       ThePlaguePT
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -22,7 +22,7 @@
     const APP = {
         id: "tpMapMarker",
         title: "Marcador de Aldeias",
-        version: "2.5.20",
+        version: "2.5.21",
         displayBaseTitle: "Marcador - ThePlaguePT",
         get displayTitle() {
             return `${this.displayBaseTitle} v${this.version}`;
@@ -34,6 +34,7 @@
     const gd = window.game_data || {};
     const world = gd.world || location.hostname.split(".")[0] || "world";
     const storageKey = `${APP.id}:${world}`;
+    const ZONE_SIZES = [25, 50, 100, 150, 200, 250, 300];
     const state = {
         coords: new Map(),
         secondaryCoords: new Map(),
@@ -116,7 +117,7 @@
             state.tribeQuery = String(saved.tribeQuery || "");
             state.disabledTribePlayerIds = new Set(Array.isArray(saved.disabledTribePlayerIds) ? saved.disabledTribePlayerIds.map(Number).filter(Number.isFinite) : []);
             state.distance = Math.max(1, Math.min(200, Number(saved.distance) || 20));
-            state.zoneSize = Number(saved.zoneSize) === 50 ? 50 : 25;
+            state.zoneSize = normalizeZoneSize(saved.zoneSize);
             state.zonesEnabled = saved.zonesEnabled === true;
             state.bonusTypes = Array.isArray(saved.bonusTypes) ? saved.bonusTypes.map(String) : [];
             state.bonusEnabled = saved.bonusEnabled === true;
@@ -173,6 +174,11 @@
             if (x <= 999 && y <= 999) result.set(`${x}|${y}`, { x, y });
         }
         return result;
+    }
+
+    function normalizeZoneSize(value) {
+        const size = Number(value);
+        return ZONE_SIZES.includes(size) ? size : ZONE_SIZES[0];
     }
 
     function setCoordinates(value) {
@@ -2091,7 +2097,7 @@
                         <div><h3>Filtros e zonas</h3><p>Reduz a lista por distância e cria grupos geográficos limitados.</p></div>
                         <div class="${APP.id}-tools">
                             <div class="${APP.id}-tool"><span class="${APP.id}-toolTitle">Distância às minhas aldeias</span><div class="${APP.id}-toolLine"><span>Máximo</span><input class="tp-distance" type="number" min="1" max="200" step="1" value="${state.distance}"><span>campos</span><button class="tp-filter" type="button">Filtrar lista</button></div></div>
-                            <div class="${APP.id}-tool"><span class="${APP.id}-toolTitle">Zonas geográficas</span><div class="${APP.id}-toolLine"><span>Máximo</span><select class="tp-zone-size"><option value="25" ${state.zoneSize === 25 ? "selected" : ""}>25 aldeias</option><option value="50" ${state.zoneSize === 50 ? "selected" : ""}>50 aldeias</option></select><button class="tp-zones" type="button">Criar zonas</button><label><input class="tp-zones-enabled" type="checkbox" ${state.zonesEnabled ? "checked" : ""}> Mostrar zonas no mapa</label></div></div>
+                            <div class="${APP.id}-tool"><span class="${APP.id}-toolTitle">Zonas geográficas</span><div class="${APP.id}-toolLine"><span>Máximo</span><select class="tp-zone-size">${ZONE_SIZES.map((size) => `<option value="${size}" ${state.zoneSize === size ? "selected" : ""}>${size} aldeias</option>`).join("")}</select><button class="tp-zones" type="button">Criar zonas</button><label><input class="tp-zones-enabled" type="checkbox" ${state.zonesEnabled ? "checked" : ""}> Mostrar zonas no mapa</label></div></div>
                         </div>
                     </section>
                     <section class="${APP.id}-section ${APP.id}-zonesSection ${state.zones.length ? "tp-visible" : ""}">
@@ -2209,7 +2215,7 @@
             const button = event.currentTarget;
             button.disabled = true;
             button.textContent = "A ordenar…";
-            state.zoneSize = Number(panel.querySelector(".tp-zone-size").value) === 50 ? 50 : 25;
+            state.zoneSize = normalizeZoneSize(panel.querySelector(".tp-zone-size").value);
             try {
                 const own = await loadOwnVillages();
                 state.zones = buildZones(coordinatesToGroup, state.zoneSize, own);
@@ -2303,7 +2309,7 @@
             state.showLabels = panel.querySelector(".tp-labels").checked;
             state.coordinatesEnabled = panel.querySelector(".tp-enabled").checked;
             state.distance = Math.max(1, Math.min(200, Number(panel.querySelector(".tp-distance").value) || 20));
-            state.zoneSize = Number(panel.querySelector(".tp-zone-size").value) === 50 ? 50 : 25;
+            state.zoneSize = normalizeZoneSize(panel.querySelector(".tp-zone-size").value);
             state.zonesEnabled = panel.querySelector(".tp-zones-enabled")?.checked === true && state.zones.length > 0;
             state.bonusTypes = [...panel.querySelectorAll(`.${APP.id}-bonusOptions input:checked`)].map((input) => String(input.value));
             state.bonusEnabled = panel.querySelector(".tp-bonus-enabled")?.checked === true;
