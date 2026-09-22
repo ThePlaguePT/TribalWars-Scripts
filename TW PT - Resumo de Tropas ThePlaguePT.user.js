@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TW PT - Resumo de Tropas - ThePlaguePT
 // @namespace    https://github.com/ThePlaguePT/TribalWars-Scripts
-// @version      2.0.1
+// @version      2.0.2
 // @description  Resume as tropas do grupo atual, classifica os exercitos e exporta um cartao PNG.
 // @author       ThePlaguePT
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -17,7 +17,7 @@
     const APP = {
         id: 'twp-troop-summary',
         title: 'Resumo de Tropas',
-        version: '2.0.1',
+        version: '2.0.2',
         storageKey: 'twp_troop_summary_settings_v1'
     };
 
@@ -356,30 +356,48 @@
         return robustPlaceBreakdown(doc);
     }
 
+    function delay(milliseconds) {
+        return new Promise(resolve => setTimeout(resolve, milliseconds));
+    }
+
+    async function fetchPlaceWithRetry(villageId, attempts = 3) {
+        let lastError = null;
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+            try {
+                const response = await fetch(placeUrl(villageId), { credentials: 'include', cache: 'no-store' });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+                if (doc.querySelector('#bot_check, .g-recaptcha')) {
+                    throw new Error('O jogo pediu verificação');
+                }
+                return doc;
+            } catch (error) {
+                lastError = error;
+                if (attempt < attempts) await delay(450 * attempt);
+            }
+        }
+        throw lastError || new Error('Falha ao carregar a Praça de Reuniões');
+    }
+
     async function collectActivities(villages) {
         const totals = { home: emptyUnits(), scavenge: emptyUnits(), farm: emptyUnits(), transit: emptyUnits(), support: emptyUnits() };
         const valid = villages.filter(village => village.id);
         if (!valid.length) throw new Error('Não foi possível identificar os IDs das aldeias na vista de tropas.');
         if (valid.length !== villages.length) throw new Error(`Leitura incompleta: só foram identificadas ${valid.length} de ${villages.length} aldeias.`);
-        const concurrency = 4;
-        let cursor = 0;
         let completed = 0;
         const failures = [];
-        async function worker() {
-            while (cursor < valid.length) {
-                const village = valid[cursor++];
-                try {
-                    const response = await fetch(placeUrl(village.id), { credentials: 'include', cache: 'no-store' });
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    const parsed = parseActivityDocument(new DOMParser().parseFromString(await response.text(), 'text/html'));
-                    Object.keys(totals).forEach(kind => addUnits(totals[kind], parsed[kind]));
-                } catch (error) { failures.push({ id: village.id, error }); }
-                completed += 1;
-                state.progress = `A analisar movimentos… ${completed}/${valid.length}`;
-                render();
+        for (const village of valid) {
+            try {
+                const parsed = parseActivityDocument(await fetchPlaceWithRetry(village.id));
+                Object.keys(totals).forEach(kind => addUnits(totals[kind], parsed[kind]));
+            } catch (error) {
+                failures.push({ id: village.id, error });
             }
+            completed += 1;
+            state.progress = `A analisar movimentos… ${completed}/${valid.length}`;
+            render();
+            if (completed < valid.length) await delay(150);
         }
-        await Promise.all(Array.from({ length: Math.min(concurrency, valid.length || 1) }, worker));
         if (failures.length) throw new Error(`Leitura incompleta: falharam ${failures.length} de ${valid.length} Praças de Reuniões.`);
         return totals;
     }
