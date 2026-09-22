@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TW PT - Resumo de Tropas - ThePlaguePT
 // @namespace    https://github.com/ThePlaguePT/TribalWars-Scripts
-// @version      1.8.0
+// @version      1.9.0
 // @description  Resume as tropas do grupo atual, classifica os exercitos e exporta um cartao PNG.
 // @author       ThePlaguePT
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -17,7 +17,7 @@
     const APP = {
         id: 'twp-troop-summary',
         title: 'Resumo de Tropas',
-        version: '1.8.0',
+        version: '1.9.0',
         storageKey: 'twp_troop_summary_settings_v1'
     };
 
@@ -200,40 +200,8 @@
         originRows.forEach(origin => {
             for (let row = origin.nextElementSibling; row && !row.classList.contains('units_away'); row = row.nextElementSibling) {
                 if (!row.matches('tr.row_a, tr.row_b, tr.row_ax, tr.row_bx')) continue;
-                const cells = Array.from(row.children);
-                const trailing = cells.slice(-found.columns.length);
-                found.columns.forEach(({ key, index }, unitIndex) => {
-                    const direct = troopCellNumber(cells[index]);
-                    const fromRight = troopCellNumber(trailing[unitIndex]);
-                    totals[key] += Math.max(direct, fromRight);
-                });
+                addUnits(totals, parseRowFromRight(row, found.columns));
             }
-        });
-        return totals;
-    }
-
-    function supportOverviewUrl(baseDoc) {
-        const link = Array.from(baseDoc?.querySelectorAll?.('a[href*="screen=overview_villages"][href*="mode=units"]') || [])
-            .find(item => /^(apoio|apoios|suporte|support|supports)$/i.test((item.textContent || '').trim()));
-        if (link) return new URL(link.getAttribute('href'), location.origin);
-        return overviewUrl('support');
-    }
-
-    async function fetchSupportOverview(baseDoc) {
-        const response = await fetch(supportOverviewUrl(baseDoc), { credentials: 'include', cache: 'no-store' });
-        if (!response.ok) throw new Error(`O jogo respondeu com HTTP ${response.status} na vista de apoios.`);
-        return new DOMParser().parseFromString(await response.text(), 'text/html');
-    }
-
-    function parseSupportOverview(doc) {
-        const totals = emptyUnits();
-        const found = findTroopTable(doc);
-        if (!found) return totals;
-        directRows(found.table).filter(row => !row.querySelector('th')).forEach(row => {
-            const text = normalizedRowText(row);
-            if (!row.querySelector('input[type="checkbox"]')) return;
-            if (isTotalRow(text) || isHomeRow(text) || isScavengeRow(text)) return;
-            addUnits(totals, parseRowFromRight(row, found.columns));
         });
         return totals;
     }
@@ -297,6 +265,9 @@
         const out = { home: emptyUnits(), scavenge: emptyUnits(), farm: emptyUnits(), transit: emptyUnits(), support: emptyUnits() };
         const infos = troopTableInfos(doc);
         infos.forEach(info => {
+            const context = normalizedRowText(info.table.previousElementSibling) + ' ' +
+                normalizedRowText(info.table.previousElementSibling?.previousElementSibling);
+            const transitSection = /tropas? em transito|em transito|comandos?|commands?|in transit|troops? in transit|movimentos?/.test(context);
             const totalScavenge = info.rows.find(item => isTotalRow(item.text)) && info.rows.some(item => isScavengeRow(item.text));
             info.rows.forEach(item => {
                 if (isTotalRow(item.text)) {
@@ -310,7 +281,10 @@
                 }
                 if (isSupportRow(item.text)) { addUnits(out.support, item.units); return; }
                 if (isHomeRow(item.text)) { addUnits(out.home, item.units); return; }
-                if (hasCoordsText(item.text)) { addUnits(out.transit, item.units); }
+                const timedCommand = /chegada|chega em|chega as|arrives?|arrival|return|regresso|retorno|\b\d{1,2}:\d{2}:\d{2}\b/.test(item.text);
+                if (hasCoordsText(item.text) && (transitSection || timedCommand || /\b(comando|comandos|command|commands)\b/.test(item.text))) {
+                    addUnits(out.transit, item.units);
+                }
             });
         });
         if (!unitCount(out.home)) {
@@ -423,11 +397,10 @@
         state.progress = 'A carregar o resumo de tropas…';
         render();
         try {
-            const completeDoc = await fetchOverview('complete');
-            const supportDoc = await fetchSupportOverview(completeDoc);
+            const [completeDoc, awayDoc] = await Promise.all([fetchOverview('complete'), fetchOverview('away_detail')]);
             const villages = parseOverview(completeDoc);
             const totals = villages.reduce((sum, village) => addUnits(sum, village.units), emptyUnits());
-            const overviewSupport = parseSupportOverview(supportDoc);
+            const overviewSupport = parseAwaySupports(awayDoc);
             const group = document.querySelector('#group_selection option:checked')?.textContent?.trim() || 'Todas';
             state.progress = `A analisar ${villages.length} Praças de Reuniões…`;
             render();
@@ -491,9 +464,7 @@
             ['Exércitos com nobre', 'Full com nobre', armies.noble.full],
             ...nobleTrainRows,
             ['Exércitos ofensivos', 'Fulls', armies.attack.full], ['', 'Meios fulls', armies.attack.half],
-            ['', 'Pequenos fulls', armies.attack.small], ['', 'Fulls de catapultas', armies.attack.catapult],
-            ['Exércitos defensivos', 'Defesas completas', armies.defense.full], ['', '3/4 de defesa', armies.defense.threeQuarter],
-            ['', '1/2 defesa', armies.defense.half], ['', '1/4 defesa', armies.defense.quarter]
+            ['', 'Pequenos fulls', armies.attack.small], ['', 'Fulls de catapultas', armies.attack.catapult]
         ];
     }
 
