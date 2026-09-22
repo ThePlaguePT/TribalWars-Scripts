@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TW PT - Resumo de Tropas - ThePlaguePT
 // @namespace    https://github.com/ThePlaguePT/TribalWars-Scripts
-// @version      2.1.1
+// @version      2.2.0
 // @description  Resume as tropas do grupo atual, classifica os exercitos e exporta um cartao PNG.
 // @author       ThePlaguePT
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -17,7 +17,7 @@
     const APP = {
         id: 'twp-troop-summary',
         title: 'Resumo de Tropas',
-        version: '2.1.1',
+        version: '2.2.0',
         storageKey: 'twp_troop_summary_settings_v1'
     };
 
@@ -103,12 +103,50 @@
         return Array.from(table.querySelectorAll('tr')).filter(row => row.closest('table') === table);
     }
 
+    const troopGridCache = new WeakMap();
+
+    function troopGrid(table) {
+        if (troopGridCache.has(table)) return troopGridCache.get(table);
+        const rows = directRows(table), grid = [], rowIndexes = new WeakMap();
+        rows.forEach((row, rowIndex) => {
+            rowIndexes.set(row, rowIndex);
+            if (!grid[rowIndex]) grid[rowIndex] = [];
+            let columnIndex = 0;
+            Array.from(row.children).forEach(cell => {
+                while (grid[rowIndex][columnIndex]) columnIndex += 1;
+                const colspan = Math.max(1, Number(cell.getAttribute('colspan') || 1));
+                const rowspan = Math.max(1, Number(cell.getAttribute('rowspan') || 1));
+                for (let y = 0; y < rowspan; y += 1) {
+                    if (!grid[rowIndex + y]) grid[rowIndex + y] = [];
+                    for (let x = 0; x < colspan; x += 1) grid[rowIndex + y][columnIndex + x] = cell;
+                }
+                columnIndex += colspan;
+            });
+        });
+        const info = { rows, grid, rowIndexes };
+        troopGridCache.set(table, info);
+        return info;
+    }
+
+    function virtualCell(row, columnIndex) {
+        const table = row?.closest('table');
+        if (!table) return null;
+        const info = troopGrid(table);
+        const rowIndex = info.rowIndexes.get(row);
+        return info.grid[rowIndex]?.[columnIndex] || null;
+    }
+
     function findTroopTable(doc) {
         const tables = Array.from(doc.querySelectorAll('#units_table, table.vis'));
         let best = null;
         for (const table of tables) {
             for (const row of directRows(table)) {
-                const columns = Array.from(row.children).map((cell, index) => ({ key: detectUnit(cell), index })).filter(item => item.key);
+                let virtualIndex = 0;
+                const columns = Array.from(row.children).map((cell, cellIndex) => {
+                    const item = { key: detectUnit(cell), index: virtualIndex, cellIndex };
+                    virtualIndex += Math.max(1, Number(cell.getAttribute('colspan') || 1));
+                    return item;
+                }).filter(item => item.key);
                 if (!best || columns.length > best.columns.length) best = { table, columns };
             }
         }
@@ -290,6 +328,13 @@
 
     function parseRowFromRight(row, columns) {
         const result = emptyUnits();
+        columns.forEach(column => {
+            const cell = virtualCell(row, column.index);
+            if (cell && !/\b\d{1,3}\s*\|\s*\d{1,3}\b/.test(cell.textContent || '')) {
+                result[column.key] = troopCellNumber(cell);
+            }
+        });
+        if (unitCount(result)) return result;
         const cells = Array.from(row?.children || []);
         const values = cells.filter(cell => {
             const text = (cell.textContent || '').replace(/\u00a0/g, ' ').trim();
@@ -344,7 +389,11 @@
                     if (totalScavenge) addUnits(out.scavenge, item.units);
                     return;
                 }
-                if (/am_farm|farm_icon|assistente de farm|farm assistant|saque|pilhagem/.test(item.text)) { addUnits(out.farm, item.units); return; }
+                const farmRow = /am[_-]?farm|farm[_-]?icon|assistente\s+de\s+farm|farm\s+assistant|saque|pilhagem|barbar|abandon|abandonn|opusten|opuszczon|elhagyott|terk\s*edilmis|parasit|βαρβαρ|εγκαταλε/.test(item.text);
+                if (farmRow && !isSupportRow(item.text) && !isScavengeRow(item.text)) {
+                    out.farm.light += Number(item.units.light || 0);
+                    return;
+                }
                 if (isScavengeRow(item.text)) {
                     if (!totalScavenge) addUnits(out.scavenge, item.units);
                     return;
