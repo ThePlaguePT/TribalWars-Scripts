@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TW PT - Resumo de Tropas - ThePlaguePT
 // @namespace    https://github.com/ThePlaguePT/TribalWars-Scripts
-// @version      1.7.5
+// @version      1.8.0
 // @description  Resume as tropas do grupo atual, classifica os exercitos e exporta um cartao PNG.
 // @author       ThePlaguePT
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -17,7 +17,7 @@
     const APP = {
         id: 'twp-troop-summary',
         title: 'Resumo de Tropas',
-        version: '1.7.5',
+        version: '1.8.0',
         storageKey: 'twp_troop_summary_settings_v1'
     };
 
@@ -26,13 +26,14 @@
         ['archer', 'Arqueiros', 1], ['spy', 'Exploradores', 2], ['light', 'Cavalaria leve', 4],
         ['marcher', 'Arqueiros a cavalo', 5], ['heavy', 'Cavalaria pesada', 6],
         ['ram', 'Aríetes', 5], ['catapult', 'Catapultas', 8], ['knight', 'Paladinos', 10],
-        ['snob', 'Nobres', 100], ['militia', 'Milícia', 0]
+        ['snob', 'Nobres', 100]
     ];
     const FALLBACK_MAP = Object.fromEntries(FALLBACK_UNITS.map(row => [row[0], row]));
     const WORLD_UNIT_KEYS = Array.isArray(window.game_data?.units) && window.game_data.units.length
         ? window.game_data.units.slice()
         : FALLBACK_UNITS.map(([key]) => key);
     const UNIT_KEYS = Array.from(new Set(WORLD_UNIT_KEYS));
+    const DISPLAY_UNIT_KEYS = UNIT_KEYS.filter(key => key !== 'militia');
     function worldUnitLabel(key) {
         return window.unit_info?.[key]?.name || window.game_data?.units_info?.[key]?.name || window.Config?.units?.[key]?.name || FALLBACK_MAP[key]?.[1] || key;
     }
@@ -211,6 +212,32 @@
         return totals;
     }
 
+    function supportOverviewUrl(baseDoc) {
+        const link = Array.from(baseDoc?.querySelectorAll?.('a[href*="screen=overview_villages"][href*="mode=units"]') || [])
+            .find(item => /^(apoio|apoios|suporte|support|supports)$/i.test((item.textContent || '').trim()));
+        if (link) return new URL(link.getAttribute('href'), location.origin);
+        return overviewUrl('support');
+    }
+
+    async function fetchSupportOverview(baseDoc) {
+        const response = await fetch(supportOverviewUrl(baseDoc), { credentials: 'include', cache: 'no-store' });
+        if (!response.ok) throw new Error(`O jogo respondeu com HTTP ${response.status} na vista de apoios.`);
+        return new DOMParser().parseFromString(await response.text(), 'text/html');
+    }
+
+    function parseSupportOverview(doc) {
+        const totals = emptyUnits();
+        const found = findTroopTable(doc);
+        if (!found) return totals;
+        directRows(found.table).filter(row => !row.querySelector('th')).forEach(row => {
+            const text = normalizedRowText(row);
+            if (!row.querySelector('input[type="checkbox"]')) return;
+            if (isTotalRow(text) || isHomeRow(text) || isScavengeRow(text)) return;
+            addUnits(totals, parseRowFromRight(row, found.columns));
+        });
+        return totals;
+    }
+
     function placeUrl(villageId) {
         const url = new URL(location.href);
         url.searchParams.set('screen', 'place');
@@ -218,20 +245,6 @@
         url.searchParams.set('village', String(villageId));
         ['action', 'ajax', 'h'].forEach(key => url.searchParams.delete(key));
         return url;
-    }
-
-    async function detectKnightTraining() {
-        if (!UNIT_KEYS.includes('knight')) return 0;
-        try {
-            const url = new URL(location.href);
-            url.searchParams.set('screen', 'statue');
-            ['action', 'ajax', 'h'].forEach(key => url.searchParams.delete(key));
-            const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
-            if (!response.ok) return 0;
-            const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
-            const text = normalizedRowText(doc.body);
-            return /recrut|trein|training|recruit|unit_knight.*(cancel|tempo|duration)/.test(text) && /unit_knight|paladin/.test(text) ? 1 : 0;
-        } catch (_) { return 0; }
     }
 
     function activityKind(row) {
@@ -290,11 +303,11 @@
                     if (totalScavenge) addUnits(out.scavenge, item.units);
                     return;
                 }
+                if (/am_farm|farm_icon|assistente de farm|farm assistant|saque|pilhagem/.test(item.text)) { addUnits(out.farm, item.units); return; }
                 if (isScavengeRow(item.text)) {
                     if (!totalScavenge) addUnits(out.scavenge, item.units);
                     return;
                 }
-                if (/am_farm|farm_icon|assistente de farm|farm assistant|saque|pilhagem|loot/.test(item.text)) { addUnits(out.farm, item.units); return; }
                 if (isSupportRow(item.text)) { addUnits(out.support, item.units); return; }
                 if (isHomeRow(item.text)) { addUnits(out.home, item.units); return; }
                 if (hasCoordsText(item.text)) { addUnits(out.transit, item.units); }
@@ -315,24 +328,27 @@
         const totals = { home: emptyUnits(), scavenge: emptyUnits(), farm: emptyUnits(), transit: emptyUnits(), support: emptyUnits() };
         const valid = villages.filter(village => village.id);
         if (!valid.length) throw new Error('Não foi possível identificar os IDs das aldeias na vista de tropas.');
+        if (valid.length !== villages.length) throw new Error(`Leitura incompleta: só foram identificadas ${valid.length} de ${villages.length} aldeias.`);
         const concurrency = 4;
         let cursor = 0;
         let completed = 0;
+        const failures = [];
         async function worker() {
             while (cursor < valid.length) {
                 const village = valid[cursor++];
                 try {
                     const response = await fetch(placeUrl(village.id), { credentials: 'include', cache: 'no-store' });
-                    if (!response.ok) continue;
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const parsed = parseActivityDocument(new DOMParser().parseFromString(await response.text(), 'text/html'));
                     Object.keys(totals).forEach(kind => addUnits(totals[kind], parsed[kind]));
-                } catch (_) {}
+                } catch (error) { failures.push({ id: village.id, error }); }
                 completed += 1;
                 state.progress = `A analisar movimentos… ${completed}/${valid.length}`;
                 render();
             }
         }
         await Promise.all(Array.from({ length: Math.min(concurrency, valid.length || 1) }, worker));
+        if (failures.length) throw new Error(`Leitura incompleta: falharam ${failures.length} de ${valid.length} Praças de Reuniões.`);
         return totals;
     }
 
@@ -407,32 +423,28 @@
         state.progress = 'A carregar o resumo de tropas…';
         render();
         try {
-            const [completeDoc, awayDoc, knightTraining] = await Promise.all([
-                fetchOverview('complete'), fetchOverview('away_detail'), detectKnightTraining()
-            ]);
+            const completeDoc = await fetchOverview('complete');
+            const supportDoc = await fetchSupportOverview(completeDoc);
             const villages = parseOverview(completeDoc);
             const totals = villages.reduce((sum, village) => addUnits(sum, village.units), emptyUnits());
-            const overviewSupport = parseAwaySupports(awayDoc);
+            const overviewSupport = parseSupportOverview(supportDoc);
             const group = document.querySelector('#group_selection option:checked')?.textContent?.trim() || 'Todas';
             state.progress = `A analisar ${villages.length} Praças de Reuniões…`;
             render();
             const detected = await collectActivities(villages);
             UNIT_KEYS.forEach(key => {
-                detected.support[key] = Math.max(detected.support[key] || 0, overviewSupport[key] || 0);
+                detected.support[key] = Number(overviewSupport[key] || 0);
             });
-            let homeTotals = detected.home;
-            if (!unitCount(homeTotals)) {
-                homeTotals = emptyUnits();
-                UNIT_KEYS.forEach(key => {
-                    const away = (detected.scavenge[key] || 0) + (detected.farm[key] || 0) +
-                        (detected.transit[key] || 0) + (detected.support[key] || 0);
-                    homeTotals[key] = Math.max(0, (totals[key] || 0) - away);
-                });
-            }
+            const homeTotals = emptyUnits();
+            UNIT_KEYS.forEach(key => {
+                const away = (detected.scavenge[key] || 0) + (detected.farm[key] || 0) +
+                    (detected.transit[key] || 0) + (detected.support[key] || 0);
+                homeTotals[key] = Math.max(0, (totals[key] || 0) - away);
+            });
             const activities = reconcileActivities(totals, homeTotals, detected, detected.support);
             state.summary = {
                 villages, totals, armies: classify(villages), group, generatedAt: new Date(),
-                activities, knightTraining,
+                activities,
                 expectedVillageCount: Number(window.game_data?.player?.villages) || villages.length
             };
         } catch (error) {
@@ -449,16 +461,12 @@
         return window.game_data?.player?.name || document.querySelector('#menu_row2 b')?.textContent?.trim() || 'Jogador';
     }
 
-    function totalPopulation(totals) {
-        return UNIT_KEYS.reduce((sum, key) => sum + (totals[key] || 0) * (POP[key] || 0), 0);
-    }
-
     function unitIcon(key) {
         return `<img class="${APP.id}-unitIcon" src="/graphic/unit/unit_${encodeURIComponent(key)}.png" alt="${escapeHtml(LABELS[key])}" title="${escapeHtml(LABELS[key])}">`;
     }
 
     function unitCount(totals) {
-        return UNIT_KEYS.reduce((sum, key) => sum + Number(totals?.[key] || 0), 0);
+        return DISPLAY_UNIT_KEYS.reduce((sum, key) => sum + Number(totals?.[key] || 0), 0);
     }
 
     function activityHtml(activities) {
@@ -470,9 +478,9 @@
         const accounted = rows.reduce((sum, [key]) => sum + unitCount(activities[key]), 0);
         return rows.map(([key, label]) => {
             const totals = activities[key] || emptyUnits();
-            const icons = UNIT_KEYS.filter(unit => totals[unit] > 0)
+            const icons = DISPLAY_UNIT_KEYS.filter(unit => totals[unit] > 0)
                 .map(unit => `<span title="${escapeHtml(LABELS[unit])}: ${format(totals[unit])}">${unitIcon(unit)}<b>${format(totals[unit])}</b></span>`).join('');
-            return `<div class="${APP.id}-activity"><div><strong>${escapeHtml(label)}</strong><small>${format(unitCount(totals))} un. · ${format(totalPopulation(totals))} pop.</small></div><div class="${APP.id}-activityUnits">${icons || '<i>0</i>'}</div></div>`;
+            return `<div class="${APP.id}-activity"><div><strong>${escapeHtml(label)}</strong><small>${format(unitCount(totals))} un.</small></div><div class="${APP.id}-activityUnits">${icons || '<i>0</i>'}</div></div>`;
         }).join('') + `<div class="${APP.id}-activityTotal"><b>Total reconciliado</b><span>${format(accounted)} / ${format(unitCount(state.summary?.totals))} unidades</span></div>`;
     }
 
@@ -492,18 +500,15 @@
     function summaryHtml() {
         const s = state.summary;
         if (!s) return `<div class="${APP.id}-empty">${state.loading ? escapeHtml(state.progress || 'A carregar…') : 'O resumo será carregado automaticamente.'}</div>`;
-        const unitRows = UNIT_KEYS.map(key => {
-            const training = key === 'knight' && s.knightTraining ? ` <i>(${format(s.knightTraining)} em treino)</i>` : '';
-            return `<div class="${APP.id}-unit"><span>${unitIcon(key)} ${escapeHtml(LABELS[key])}${training}</span><b>${format(s.totals[key])}</b></div>`;
+        const unitRows = DISPLAY_UNIT_KEYS.map(key => {
+            return `<div class="${APP.id}-unit"><span>${unitIcon(key)} ${escapeHtml(LABELS[key])}</span><b>${format(s.totals[key])}</b></div>`;
         }).join('');
         const rows = armyRows(s.armies).map(([section, label, count]) => {
-            const defenseInput = section === 'Exércitos defensivos'
-                ? `<label class="${APP.id}-defensePop">Full: <input data-defense-pop type="number" min="1" step="100" value="${Number(state.settings.defensePopulation) || 20000}"> pop.</label>` : '';
-            return `${section ? `<div class="${APP.id}-section"><span>${escapeHtml(section)}</span>${defenseInput}</div>` : ''}<div class="${APP.id}-army"><span>» ${escapeHtml(label)}</span><b>${format(count)}</b></div>`;
+            return `${section ? `<div class="${APP.id}-section"><span>${escapeHtml(section)}</span></div>` : ''}<div class="${APP.id}-army"><span>» ${escapeHtml(label)}</span><b>${format(count)}</b></div>`;
         }).join('');
         return `<div class="${APP.id}-card" id="${APP.id}-card">
-            <div class="${APP.id}-meta"><b>Jogador:</b> ${escapeHtml(playerName())}<br><b>Grupo:</b> ${escapeHtml(s.group)}<br><b>Aldeias:</b> ${format(s.expectedVillageCount)}${s.villages.length !== s.expectedVillageCount ? ` <span class="${APP.id}-warning">(lidas ${format(s.villages.length)})</span>` : ''} · <b>População:</b> ${format(totalPopulation(s.totals))}<br><b>Hora do servidor:</b> ${escapeHtml(document.querySelector('#serverTime')?.textContent || s.generatedAt.toLocaleTimeString('pt-PT'))} ${escapeHtml(document.querySelector('#serverDate')?.textContent || s.generatedAt.toLocaleDateString('pt-PT'))}</div>
-            <div class="${APP.id}-columns"><div>${rows}</div><div><div class="${APP.id}-section">Unidades</div>${unitRows}<div class="${APP.id}-section">Totais</div><div class="${APP.id}-unit"><span>Unidades</span><b>${format(UNIT_KEYS.reduce((n, key) => n + s.totals[key], 0))}</b></div><div class="${APP.id}-unit"><span>População</span><b>${format(totalPopulation(s.totals))}</b></div></div></div>
+            <div class="${APP.id}-meta"><b>Jogador:</b> ${escapeHtml(playerName())}<br><b>Grupo:</b> ${escapeHtml(s.group)}<br><b>Aldeias:</b> ${format(s.expectedVillageCount)}${s.villages.length !== s.expectedVillageCount ? ` <span class="${APP.id}-warning">(lidas ${format(s.villages.length)})</span>` : ''}<br><b>Hora do servidor:</b> ${escapeHtml(document.querySelector('#serverTime')?.textContent || s.generatedAt.toLocaleTimeString('pt-PT'))} ${escapeHtml(document.querySelector('#serverDate')?.textContent || s.generatedAt.toLocaleDateString('pt-PT'))}</div>
+            <div class="${APP.id}-columns"><div>${rows}</div><div><div class="${APP.id}-section">Unidades</div>${unitRows}<div class="${APP.id}-section">Totais</div><div class="${APP.id}-unit"><span>Unidades</span><b>${format(unitCount(s.totals))}</b></div></div></div>
             <div class="${APP.id}-section">Distribuição do total de tropas</div>${activityHtml(s.activities)}
             <small>${APP.title} v${APP.version} · ThePlaguePT</small>
         </div>`;
@@ -527,7 +532,6 @@
                 modal = holder.firstElementChild; document.body.appendChild(modal);
             }
             modal.addEventListener('click', onClick);
-            modal.addEventListener('change', onChange);
         }
         modal.classList.add('open');
         render();
@@ -537,14 +541,6 @@
     function closeModal() {
         if (window.Dialog?.close && document.getElementById(`popup_box_${APP.id}-dialog`)) window.Dialog.close(`${APP.id}-dialog`);
         else document.getElementById(APP.id)?.classList.remove('open');
-    }
-
-    function onChange(event) {
-        if (!event.target.matches('[data-defense-pop]')) return;
-        state.settings.defensePopulation = Math.max(1, Number(event.target.value) || 20000);
-        saveSettings();
-        if (state.summary) state.summary.armies = classify(state.summary.villages);
-        render();
     }
 
     function showSettings() {
@@ -567,13 +563,13 @@
         const left = armyRows(s.armies).flatMap(([section, label, value]) => section
             ? [[section, '', ''], ['', label, value]]
             : [['', label, value]]);
-        const right = [['Unidades', '', ''], ...UNIT_KEYS.map(key => ['', `@${key}|${LABELS[key]}`, format(s.totals[key])])];
-        right.push(['Totais', '', ''], ['', 'Unidades', format(UNIT_KEYS.reduce((n, key) => n + s.totals[key], 0))], ['', 'População', format(totalPopulation(s.totals))]);
+        const right = [['Unidades', '', ''], ...DISPLAY_UNIT_KEYS.map(key => ['', `@${key}|${LABELS[key]}`, format(s.totals[key])])];
+        right.push(['Totais', '', ''], ['', 'Unidades', format(unitCount(s.totals))]);
         return { left, right };
     }
 
     async function loadCanvasUnitIcons() {
-        const entries = await Promise.all(UNIT_KEYS.map(key => new Promise(resolve => {
+        const entries = await Promise.all(DISPLAY_UNIT_KEYS.map(key => new Promise(resolve => {
             const img = new Image();
             img.onload = () => resolve([key, img]); img.onerror = () => resolve([key, null]);
             img.src = `/graphic/unit/unit_${encodeURIComponent(key)}.png`;
@@ -597,7 +593,7 @@
         ctx.strokeStyle = '#8d642b'; ctx.lineWidth = 5; ctx.strokeRect(5, 5, canvas.width - 10, canvas.height - 10);
         ctx.fillStyle = '#24180b'; ctx.font = 'bold 30px Arial'; ctx.fillText('Resumo de Tropas', 28, 46);
         ctx.font = '16px Arial';
-        const meta = [`Jogador: ${playerName()}`, `Grupo: ${s.group}`, `Aldeias: ${format(s.villages.length)}  ·  População: ${format(totalPopulation(s.totals))}`, `Hora: ${document.querySelector('#serverTime')?.textContent || s.generatedAt.toLocaleTimeString('pt-PT')} ${document.querySelector('#serverDate')?.textContent || s.generatedAt.toLocaleDateString('pt-PT')}`];
+        const meta = [`Jogador: ${playerName()}`, `Grupo: ${s.group}`, `Aldeias: ${format(s.villages.length)}`, `Hora: ${document.querySelector('#serverTime')?.textContent || s.generatedAt.toLocaleTimeString('pt-PT')} ${document.querySelector('#serverDate')?.textContent || s.generatedAt.toLocaleDateString('pt-PT')}`];
         meta.forEach((line, index) => ctx.fillText(line, 29, 70 + index * 18));
         drawCanvasColumn(ctx, left, 28, headerH, 410, rowH, unitImages);
         drawCanvasColumn(ctx, right, 462, headerH, 410, rowH, unitImages);
@@ -607,7 +603,7 @@
             activityRows.forEach(([label, units], index) => {
                 ctx.fillStyle = index % 2 ? '#f9edc9' : '#efe0b4'; ctx.fillRect(28, y, 844, rowH - 1);
                 ctx.fillStyle = '#24180b'; ctx.font = '14px Arial'; ctx.fillText(label, 36, y + 17);
-                ctx.textAlign = 'right'; ctx.font = 'bold 14px Arial'; ctx.fillText(`${format(unitCount(units))} unidades · ${format(totalPopulation(units))} pop.`, 864, y + 17); ctx.textAlign = 'left'; y += rowH;
+                ctx.textAlign = 'right'; ctx.font = 'bold 14px Arial'; ctx.fillText(`${format(unitCount(units))} unidades`, 864, y + 17); ctx.textAlign = 'left'; y += rowH;
             });
         }
         ctx.font = '12px Arial'; ctx.fillStyle = '#4d3518'; ctx.fillText(`${APP.title} v${APP.version} · ThePlaguePT`, 29, canvas.height - 20);
@@ -676,7 +672,7 @@
             .${APP.id}-close{position:absolute;right:-1px;top:-1px;z-index:3;width:22px;height:22px;padding:0;border:2px solid #4c2a12;border-radius:2px;background:#f6d28b;color:#1b0d07;font:bold 18px/16px Verdana;cursor:pointer;box-shadow:0 1px 3px #0008}. ${APP.id}-close:hover{background:#ffe0a0}
             .${APP.id}-toolbar{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));align-items:center;gap:6px;margin-bottom:7px}. ${APP.id}-toolbar>span{grid-column:1/-1;color:#7d1713;font-weight:bold}. ${APP.id}-button{min-height:29px;border:1px solid #681511;border-radius:3px;background:linear-gradient(#b13a34,#922722 55%,#731914);color:#fff;cursor:pointer;font:bold 11px Verdana,Arial,sans-serif;padding:5px 9px;text-shadow:1px 1px 1px #000;box-shadow:inset 0 1px #ffffff40,inset 0 -1px #0000004d}. ${APP.id}-button:hover{background:linear-gradient(#c4473e,#a02c27 55%,#7e1c17)}. ${APP.id}-button:disabled{opacity:.55;cursor:wait}. ${APP.id}-card{background:#f4e4b8}
             .${APP.id}-card h2{color:#8f1713;font-size:18px;margin:2px 0 5px}. ${APP.id}-meta{line-height:1.35;border-bottom:1px solid #a87829;padding-bottom:5px;margin-bottom:5px}
-            .${APP.id}-columns{display:grid;grid-template-columns:1fr 1fr;gap:7px}. ${APP.id}-section{display:flex;align-items:center;justify-content:space-between;gap:6px;background:linear-gradient(#e6c77a,#c99c48);border:1px solid #b88730;font-weight:bold;padding:3px 5px;margin-top:3px}. ${APP.id}-defensePop{display:flex;align-items:center;gap:3px;font-size:10px}. ${APP.id}-defensePop input{width:62px;height:17px;box-sizing:border-box;border:1px solid #8e5e1d;background:#fff6d7;font:10px Verdana;text-align:right}. ${APP.id}-unit i{color:#8f2b25;font-size:9px}
+            .${APP.id}-columns{display:grid;grid-template-columns:1fr 1fr;gap:7px}. ${APP.id}-section{display:flex;align-items:center;justify-content:space-between;gap:6px;background:linear-gradient(#e6c77a,#c99c48);border:1px solid #b88730;font-weight:bold;padding:3px 5px;margin-top:3px}
             .${APP.id}-army,.${APP.id}-unit{display:flex;align-items:center;justify-content:space-between;min-height:18px;padding:2px 5px}. ${APP.id}-army:nth-child(odd),.${APP.id}-unit:nth-child(odd){background:#fff7d788}. ${APP.id}-unit>span{display:flex;align-items:center;gap:3px}
             .${APP.id}-unitIcon{width:16px;height:16px;object-fit:contain;vertical-align:middle}. ${APP.id}-activityLoading{padding:8px;text-align:center;font-weight:bold}. ${APP.id}-activity{display:grid;grid-template-columns:180px 1fr;align-items:center;gap:5px;padding:3px 5px;border-bottom:1px solid #d9bc78}. ${APP.id}-activity>div:first-child{display:flex;justify-content:space-between;gap:4px}. ${APP.id}-activity small{color:#6a4a22}. ${APP.id}-activityUnits{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}. ${APP.id}-activityUnits span{display:inline-flex;align-items:center;gap:2px;white-space:nowrap}. ${APP.id}-activityTotal{display:flex;justify-content:space-between;padding:5px;background:#edd49a;border-top:1px solid #b88730}. ${APP.id}-card>small{display:block;margin-top:6px;font-weight:bold}. ${APP.id}-empty{padding:25px;text-align:center}
             #tp-theplaguept-script-bar{position:fixed !important;top:8px !important;left:414px !important;right:auto !important;bottom:auto !important;z-index:2147483647 !important;width:auto !important;min-width:0 !important;height:34px !important;display:flex !important;flex-direction:row !important;align-items:center !important;justify-content:flex-start !important;gap:5px !important;padding:0 8px !important;box-sizing:border-box !important;pointer-events:none !important;overflow:visible !important;transform:none !important;}#tp-theplaguept-script-bar>*{position:relative !important;top:auto !important;left:auto !important;right:auto !important;bottom:auto !important;transform:none !important;width:30px !important;min-width:30px !important;max-width:30px !important;height:28px !important;min-height:28px !important;margin:0 !important;flex:0 0 30px !important;pointer-events:auto !important;overflow:visible !important;}#tp-theplaguept-script-bar>button,#tp-theplaguept-script-bar>*>button{position:relative !important;top:auto !important;left:auto !important;right:auto !important;bottom:auto !important;transform:none !important;width:30px !important;min-width:30px !important;max-width:30px !important;height:28px !important;min-height:28px !important;margin:0 !important;padding:0 !important;flex:0 0 30px !important;display:inline-flex !important;align-items:center !important;justify-content:center !important;gap:0 !important;overflow:visible !important;}#tp-theplaguept-script-bar>button:hover,#tp-theplaguept-script-bar>button:focus-visible,#tp-theplaguept-script-bar>*>button:hover,#tp-theplaguept-script-bar>*>button:focus-visible,#tp-theplaguept-script-bar #tag-incomings-pt-panel:not(.ti-open) .ti-toggle:hover,#tp-theplaguept-script-bar #tag-incomings-pt-panel:not(.ti-open) .ti-toggle:focus-visible,#tp-theplaguept-script-bar>#tp-od-est-launcher:hover,#tp-theplaguept-script-bar>#tp-od-est-launcher:focus-visible{width:30px !important;min-width:30px !important;max-width:30px !important;padding:0 !important;gap:0 !important;}#tp-theplaguept-script-bar .tpdef-launcher-text,#tp-theplaguept-script-bar .tw-alerts-toggle-label,#tp-theplaguept-script-bar .ti-toggle-label,#tp-theplaguept-script-bar .ra-tp-config-button-label,#tp-theplaguept-script-bar [class$="-launcherLabel"],#tp-theplaguept-script-bar [class$="-launcher-text"]{display:none !important;max-width:0 !important;opacity:0 !important;}#tp-theplaguept-script-bar #twHubTp-launcher{order:10 !important;}#tp-theplaguept-script-bar #tw-discord-alerts-ui{order:20 !important;}#tp-theplaguept-script-bar #tpDefLauncher{order:30 !important;}#tp-theplaguept-script-bar #tag-incomings-pt-panel{order:40 !important;}#tp-theplaguept-script-bar #tpMapMarker-launcher{order:50 !important;}#tp-theplaguept-script-bar #renomear-ataques-cores-theplaguept-config-button{order:60 !important;}#tp-theplaguept-script-bar #tpResumo24h-launcher{order:70 !important;}#tp-theplaguept-script-bar #tpconq-launcher{order:80 !important;}#tp-theplaguept-script-bar #twp-troop-summary-launcher{order:85 !important;}#tp-theplaguept-script-bar #auto-farm-a-toggle{order:90 !important;}#tp-theplaguept-script-bar #tp-od-est-launcher{order:92 !important;}#tp-theplaguept-script-bar #script-coleta-toggle{order:94 !important;}#tp-theplaguept-script-bar>.tp-theplaguept-script-bar-item[data-tp-title]::after{content:attr(data-tp-title) !important;position:absolute !important;left:50% !important;top:33px !important;transform:translateX(-50%) !important;display:none !important;white-space:nowrap !important;max-width:360px !important;overflow:hidden !important;text-overflow:ellipsis !important;padding:4px 8px !important;border:1px solid #4f120f !important;border-radius:2px !important;background:linear-gradient(to bottom,#f6dfaa,#d2a05a) !important;color:#2b1509 !important;font:bold 11px Verdana,Arial,sans-serif !important;text-shadow:0 1px #fff !important;box-shadow:0 2px 6px rgba(0,0,0,.55) !important;pointer-events:none !important;z-index:2147483647 !important;}#tp-theplaguept-script-bar>.tp-theplaguept-script-bar-item[data-tp-title]:hover::after,#tp-theplaguept-script-bar>.tp-theplaguept-script-bar-item[data-tp-title]:focus-within::after{display:block !important;}@media (max-width:1919px){#tp-theplaguept-script-bar{top:50vh !important;left:max(12px,calc((100vw - 1220px) / 2 + 8px)) !important;right:auto !important;bottom:auto !important;width:34px !important;min-width:34px !important;height:auto !important;min-height:0 !important;max-height:calc(100vh - 118px) !important;flex-direction:column !important;align-items:center !important;justify-content:center !important;gap:5px !important;padding:8px 2px !important;transform:translateY(-50%) !important;}#tp-theplaguept-script-bar>#auto-farm-a-toggle::after,#tp-theplaguept-script-bar>#script-coleta-toggle::after,#tp-theplaguept-script-bar>.tp-theplaguept-script-bar-item[data-tp-title]::after{top:50% !important;left:38px !important;transform:translateY(-50%) !important;}#tp-theplaguept-script-bar [data-auto-farm-countdown],#tp-theplaguept-script-bar [data-script-coleta-countdown]{top:50% !important;left:38px !important;transform:translateY(-50%) !important;}}#tp-theplaguept-script-bar>#${APP.id}-launcher{order:85!important;position:relative!important;width:30px!important;min-width:30px!important;max-width:30px!important;height:28px!important;margin:0!important;padding:0!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;border:1px solid #4f120f!important;border-radius:2px!important;background:linear-gradient(#b33a34,#8f2420 55%,#681611)!important;box-shadow:inset 0 1px 0 #ffffff59,0 2px 5px #0007!important;cursor:pointer!important}. ${APP.id}-launcherIcon{width:18px;height:18px;background:url('/graphic/unit/unit_spear.png') center/contain no-repeat}. ${APP.id}-launcherLabel{display:none!important}
