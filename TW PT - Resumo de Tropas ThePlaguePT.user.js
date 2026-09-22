@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TW PT - Resumo de Tropas - ThePlaguePT
 // @namespace    https://github.com/ThePlaguePT/TribalWars-Scripts
-// @version      2.1.0
+// @version      2.1.1
 // @description  Resume as tropas do grupo atual, classifica os exercitos e exporta um cartao PNG.
 // @author       ThePlaguePT
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -17,7 +17,7 @@
     const APP = {
         id: 'twp-troop-summary',
         title: 'Resumo de Tropas',
-        version: '2.1.0',
+        version: '2.1.1',
         storageKey: 'twp_troop_summary_settings_v1'
     };
 
@@ -176,8 +176,9 @@
         const url = new URL(location.href);
         url.searchParams.set('screen', 'overview_villages');
         url.searchParams.set('mode', 'units');
+        url.searchParams.delete('type');
+        url.searchParams.delete('units_type');
         url.searchParams.set('type', type);
-        url.searchParams.set('units_type', type);
         url.searchParams.set('page', '-1');
         url.searchParams.delete('group');
         ['action', 'ajax', 'h'].forEach(key => url.searchParams.delete(key));
@@ -193,18 +194,23 @@
     }
 
     function supportOverviewUrl(baseDoc) {
-        const links = Array.from((baseDoc || document).querySelectorAll('a[href*="screen=overview_villages"][href*="mode=units"]'));
-        const link = links.find(item => {
-            const label = String(item.textContent || '').toLowerCase().normalize('NFD')
-                .replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
-            return /^(suporte|support|supports|supporting|apoio|apoios|apoyo|apoyos|soutien|renfort|rinforzo|rinforzi|wsparcie|podpora|sprijin|suport)$/.test(label);
-        });
-        if (link) {
-            const url = new URL(link.getAttribute('href'), location.origin);
-            url.searchParams.set('page', '-1');
-            url.searchParams.delete('group');
-            ['action', 'ajax', 'h'].forEach(key => url.searchParams.delete(key));
-            return url;
+        for (const source of [baseDoc, document].filter(Boolean)) {
+            const links = Array.from(source.querySelectorAll('a[href*="screen=overview_villages"][href*="mode=units"]'));
+            const link = links.find(item => {
+                const label = String(item.textContent || '').toLowerCase().normalize('NFD')
+                    .replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+                return ['suporte', 'support', 'supports', 'supporting', 'apoio', 'apoios', 'apoyo', 'apoyos',
+                    'soutien', 'renfort', 'rinforzo', 'rinforzi', 'wsparcie', 'podpora', 'sprijin', 'suport'].includes(label);
+            });
+            if (link) {
+                const url = new URL(link.getAttribute('href'), location.origin);
+                url.searchParams.set('screen', 'overview_villages');
+                url.searchParams.set('mode', 'units');
+                url.searchParams.set('page', '-1');
+                url.searchParams.delete('group');
+                ['action', 'ajax', 'h'].forEach(key => url.searchParams.delete(key));
+                return url;
+            }
         }
         return overviewUrl('support');
     }
@@ -217,13 +223,28 @@
         return doc;
     }
 
+    function isHomeAvailableSupportRow(text) {
+        return [
+            'desta aldeia', 'esta aldeia', 'this village', 'from this village', 'from here',
+            'in this village', 'aus diesem dorf', 'in diesem dorf', 'dit dorp', 'ce village',
+            'questo villaggio', 'esta aldea', 'esta vila', 'from own village', 'own village',
+            'na aldeia', 'na vila', 'nesta aldeia', 'nesta vila', 'in the village',
+            'in village', 'at home', 'home village', 'hier', 'im dorf', 'in dit dorp',
+            'dans ce village', 'dans le village', 'en esta aldea', 'en este pueblo',
+            'nel villaggio', 'in questo villaggio', 'w wiosce', 'w tej wiosce',
+            've vesnici', 'v teto vesnici', 'v dedine', 'v tejto dedine', 'in sat',
+            'in acest sat', 'a faluban', 'ebben a faluban', 'koyde', 'bu koyde'
+        ].some(label => text.includes(label));
+    }
+
     function parseStationedOwnSupports(doc) {
         const totals = emptyUnits();
         const found = findTroopTable(doc);
         if (!found) return totals;
         directRows(found.table).filter(row => !row.querySelector('th')).forEach(row => {
             const text = normalizedRowText(row);
-            if (isTotalRow(text) || /disponiveis|disponivel|available|desta aldeia|esta aldeia|own village|from this village/.test(text)) return;
+            if (!text || /\b(selecionar|seleccionar|select|auswahlen|auswaehlen|wybierz|vybrat|seleccion|selecteaza|kivalaszt|secin)\b/.test(text)) return;
+            if (isTotalRow(text) || isHomeAvailableSupportRow(text)) return;
             if (!row.querySelector('input[type="checkbox"]')) return;
             addUnits(totals, parseRowFromRight(row, found.columns));
         });
@@ -480,6 +501,7 @@
                 catch (_) { ownVillages = []; }
             }
             const overviewSupport = parseStationedOwnSupports(supportDoc);
+            console.log('[Resumo de Tropas] Apoios estacionados lidos da vista de suporte:', overviewSupport);
             const group = document.querySelector('#group_selection option:checked')?.textContent?.trim() || 'Todas';
             state.progress = `A analisar ${villages.length} Praças de Reuniões…`;
             render();
