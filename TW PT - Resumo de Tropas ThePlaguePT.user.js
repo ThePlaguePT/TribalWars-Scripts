@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TW PT - Resumo de Tropas - ThePlaguePT
 // @namespace    https://github.com/ThePlaguePT/TribalWars-Scripts
-// @version      2.0.0
+// @version      2.0.1
 // @description  Resume as tropas do grupo atual, classifica os exercitos e exporta um cartao PNG.
 // @author       ThePlaguePT
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -17,7 +17,7 @@
     const APP = {
         id: 'twp-troop-summary',
         title: 'Resumo de Tropas',
-        version: '2.0.0',
+        version: '2.0.1',
         storageKey: 'twp_troop_summary_settings_v1'
     };
 
@@ -299,12 +299,23 @@
     function hasCoordsText(text) { return /\b\d{1,3}\s*\|\s*\d{1,3}\b/.test(text); }
     function isHomeRow(text) { return /desta aldeia|esta aldeia|tropas proprias|as suas proprias|own troops|from this village|own village|eigene truppen/.test(text); }
 
+    function nearbyTableContext(table) {
+        const parts = [];
+        let current = table?.previousElementSibling;
+        for (let index = 0; index < 5 && current; index += 1) {
+            if (current.matches?.('table')) break;
+            parts.push(current.textContent || '');
+            current = current.previousElementSibling;
+        }
+        return parts.reverse().join(' ').toLowerCase().normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+    }
+
     function robustPlaceBreakdown(doc) {
         const out = { home: emptyUnits(), scavenge: emptyUnits(), farm: emptyUnits(), transit: emptyUnits(), support: emptyUnits() };
         const infos = troopTableInfos(doc);
         infos.forEach(info => {
-            const context = normalizedRowText(info.table.previousElementSibling) + ' ' +
-                normalizedRowText(info.table.previousElementSibling?.previousElementSibling);
+            const context = nearbyTableContext(info.table);
             const transitSection = /tropas? em transito|em transito|comandos?|commands?|in transit|troops? in transit|movimentos?/.test(context);
             const totalScavenge = info.rows.find(item => isTotalRow(item.text)) && info.rows.some(item => isScavengeRow(item.text));
             info.rows.forEach(item => {
@@ -318,8 +329,12 @@
                     return;
                 }
                 if (isSupportRow(item.text)) {
-                    const supportTransit = transitSection || hasCoordsText(item.text) ||
-                        /chegada|chega em|chega as|arrives?|arrival|return|regresso|retorno|a caminho|\b\d{1,2}:\d{2}:\d{2}\b/.test(item.text);
+                    // Mesmo critério do Alertas Discord: ter coordenadas não basta,
+                    // pois os apoios já estacionados também mostram a aldeia destino.
+                    const supportTransit = transitSection ||
+                        /tropas? em transito|em transito|comandos?|commands?|in transit|troops? in transit|bewegung|unterwegs|movimientos?|mouvements?|movimenti/.test(item.text) ||
+                        /chegada|chega em|chega as|arrives?|arrival|return|regresso|retorno|\b\d{1,2}:\d{2}:\d{2}\b/.test(item.text) ||
+                        (hasCoordsText(item.text) && /\b(comando|comandos|command|commands)\b/.test(item.text));
                     if (supportTransit) addUnits(out.support, item.units);
                     return;
                 }
@@ -483,15 +498,12 @@
     }
 
     function activityHtml(activities) {
-        if (!activities) return `<div class="${APP.id}-activityLoading">A analisar coleta, farm, trânsito e apoios…</div>`;
+        if (!activities) return `<div class="${APP.id}-activityLoading">A analisar coleta, farm e apoios…</div>`;
         const rows = [
             ['home', 'Prontas em casa'], ['scavenge', 'Em coleta'], ['farm', 'Assistente de Farm'],
-            ['transit', 'Em trânsito'], ['support', 'Em apoios']
+            ['support', 'Em apoios']
         ];
-        // Tal como no Alertas Discord, o disponível já inclui movimentos próprios
-        // que não sejam apoio, coleta ou farm. O trânsito é apenas informativo.
-        const accounted = ['home', 'scavenge', 'farm', 'support']
-            .reduce((sum, key) => sum + unitCount(activities[key]), 0);
+        const accounted = rows.reduce((sum, [key]) => sum + unitCount(activities[key]), 0);
         return rows.map(([key, label]) => {
             const totals = activities[key] || emptyUnits();
             const icons = DISPLAY_UNIT_KEYS.filter(unit => totals[unit] > 0)
@@ -597,7 +609,7 @@
         const { left, right } = canvasRows();
         const activityRows = s.activities ? [
             ['Prontas em casa', s.activities.home], ['Em coleta', s.activities.scavenge],
-            ['Assistente de Farm', s.activities.farm], ['Em trânsito', s.activities.transit], ['Em apoios', s.activities.support]
+            ['Assistente de Farm', s.activities.farm], ['Em apoios', s.activities.support]
         ] : [];
         const rowH = 24, headerH = 118, contentRows = Math.max(left.length, right.length), activityH = activityRows.length ? 30 + activityRows.length * rowH : 0;
         const canvas = document.createElement('canvas');
