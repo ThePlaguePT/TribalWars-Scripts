@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TW PT - Resumo de Tropas - ThePlaguePT
 // @namespace    https://github.com/ThePlaguePT/TribalWars-Scripts
-// @version      2.0.2
+// @version      2.1.0
 // @description  Resume as tropas do grupo atual, classifica os exercitos e exporta um cartao PNG.
 // @author       ThePlaguePT
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -17,7 +17,7 @@
     const APP = {
         id: 'twp-troop-summary',
         title: 'Resumo de Tropas',
-        version: '2.0.2',
+        version: '2.1.0',
         storageKey: 'twp_troop_summary_settings_v1'
     };
 
@@ -437,7 +437,7 @@
     function classify(villages) {
         const result = {
             noble: { full: 0, trains: {} },
-            attack: { full: 0, half: 0, small: 0, catapult: 0 },
+            attack: { full: 0, half: 0, small: 0 },
             defense: { full: 0, threeQuarter: 0, half: 0, quarter: 0 }
         };
         const attackKeys = ['axe', 'light', 'marcher', 'ram', 'catapult'];
@@ -450,14 +450,11 @@
             if (attackUnits.snob > 0) {
                 if (attackUnits.snob > 1) result.noble.trains[attackUnits.snob] = (result.noble.trains[attackUnits.snob] || 0) + 1;
                 else if (attackUnits.axe >= 5000 && attackUnits.light >= 2000) result.noble.full += 1;
-                continue;
             }
-            if (attackUnits.axe > 0 && attackUnits.light > 0) {
-                if (attackUnits.axe >= 5000 && attackUnits.light >= 2000) result.attack.full += 1;
-                else if (attackUnits.axe >= 2500 && attackUnits.light >= 1000) result.attack.half += 1;
-                else if (attackUnits.axe > 0 && attackUnits.light > 0) result.attack.small += 1;
-                if (attackUnits.catapult * POP.catapult >= attackPop * 0.2) result.attack.catapult += 1;
-            } else if (defensePop > 0) {
+            if (attackUnits.axe >= 5000 && attackUnits.light >= 2000) result.attack.full += 1;
+            else if (attackUnits.axe >= 2500 && attackUnits.light >= 1000) result.attack.half += 1;
+            else if (attackUnits.axe >= 1250 && attackUnits.light >= 500) result.attack.small += 1;
+            else if (defensePop > 0 && !(attackUnits.axe > 0 && attackUnits.light > 0)) {
                 increment(result.defense, tier(defensePop, state.settings.defensePopulation));
             }
         }
@@ -515,19 +512,46 @@
         return DISPLAY_UNIT_KEYS.reduce((sum, key) => sum + Number(totals?.[key] || 0), 0);
     }
 
+    const DEFENSE_KEYS = ['spear', 'sword', 'archer', 'heavy', 'light', 'spy'].filter(key => UNIT_KEYS.includes(key));
+
+    function defenseUnits(source, farmOnly = false) {
+        const result = emptyUnits();
+        const keys = farmOnly ? ['light'] : DEFENSE_KEYS;
+        keys.forEach(key => { result[key] = Math.max(0, Number(source?.[key]) || 0); });
+        return result;
+    }
+
+    function subtractDefense(base, ...sources) {
+        const result = defenseUnits(base);
+        DEFENSE_KEYS.forEach(key => {
+            result[key] = Math.max(0, result[key] - sources.reduce((sum, source) => sum + Number(source?.[key] || 0), 0));
+        });
+        return result;
+    }
+
+    function defenseDistribution(activities) {
+        const total = defenseUnits(state.summary?.totals);
+        const support = defenseUnits(activities?.support);
+        const scavenge = defenseUnits(activities?.scavenge);
+        // Igual ao Alertas Discord: no Assistente de Farm só entra Cavalaria Leve.
+        const farm = defenseUnits(activities?.farm, true);
+        return { total, support, scavenge, farm, available: subtractDefense(total, support, scavenge, farm) };
+    }
+
     function activityHtml(activities) {
         if (!activities) return `<div class="${APP.id}-activityLoading">A analisar coleta, farm e apoios…</div>`;
+        const distribution = defenseDistribution(activities);
         const rows = [
-            ['home', 'Prontas em casa'], ['scavenge', 'Em coleta'], ['farm', 'Assistente de Farm'],
-            ['support', 'Em apoios']
+            ['total', 'Defesa total'], ['support', 'Em apoios'], ['scavenge', 'Em coleta'],
+            ['farm', 'Assistente de Farm'], ['available', 'Disponível']
         ];
-        const accounted = rows.reduce((sum, [key]) => sum + unitCount(activities[key]), 0);
+        const accounted = unitCount(distribution.total);
         return rows.map(([key, label]) => {
-            const totals = activities[key] || emptyUnits();
-            const icons = DISPLAY_UNIT_KEYS.filter(unit => totals[unit] > 0)
+            const totals = distribution[key] || emptyUnits();
+            const icons = DEFENSE_KEYS.filter(unit => totals[unit] > 0)
                 .map(unit => `<span title="${escapeHtml(LABELS[unit])}: ${format(totals[unit])}">${unitIcon(unit)}<b>${format(totals[unit])}</b></span>`).join('');
             return `<div class="${APP.id}-activity"><div><strong>${escapeHtml(label)}</strong><small>${format(unitCount(totals))} un.</small></div><div class="${APP.id}-activityUnits">${icons || '<i>0</i>'}</div></div>`;
-        }).join('') + `<div class="${APP.id}-activityTotal"><b>Total reconciliado</b><span>${format(accounted)} / ${format(unitCount(state.summary?.totals))} unidades</span></div>`;
+        }).join('') + `<div class="${APP.id}-activityTotal"><b>Total de defesa</b><span>${format(accounted)} unidades</span></div>`;
     }
 
     function armyRows(armies) {
@@ -537,7 +561,7 @@
             ['Exércitos com nobre', 'Full com nobre', armies.noble.full],
             ...nobleTrainRows,
             ['Exércitos ofensivos', 'Fulls', armies.attack.full], ['', 'Meios fulls', armies.attack.half],
-            ['', 'Pequenos fulls', armies.attack.small], ['', 'Fulls de catapultas', armies.attack.catapult]
+            ['', 'Pequenos fulls', armies.attack.small]
         ];
     }
 
@@ -625,9 +649,11 @@
         const s = state.summary;
         const unitImages = await loadCanvasUnitIcons();
         const { left, right } = canvasRows();
-        const activityRows = s.activities ? [
-            ['Prontas em casa', s.activities.home], ['Em coleta', s.activities.scavenge],
-            ['Assistente de Farm', s.activities.farm], ['Em apoios', s.activities.support]
+        const defense = s.activities ? defenseDistribution(s.activities) : null;
+        const activityRows = defense ? [
+            ['Defesa total', defense.total], ['Em apoios', defense.support],
+            ['Em coleta', defense.scavenge], ['Assistente de Farm', defense.farm],
+            ['Disponível', defense.available]
         ] : [];
         const rowH = 24, headerH = 118, contentRows = Math.max(left.length, right.length), activityH = activityRows.length ? 30 + activityRows.length * rowH : 0;
         const canvas = document.createElement('canvas');
