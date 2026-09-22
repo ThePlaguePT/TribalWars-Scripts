@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TW PT - Resumo de Tropas - ThePlaguePT
 // @namespace    https://github.com/ThePlaguePT/TribalWars-Scripts
-// @version      1.9.0
+// @version      2.0.0
 // @description  Resume as tropas do grupo atual, classifica os exercitos e exporta um cartao PNG.
 // @author       ThePlaguePT
 // @match        https://*.tribalwars.com.pt/game.php*
@@ -17,7 +17,7 @@
     const APP = {
         id: 'twp-troop-summary',
         title: 'Resumo de Tropas',
-        version: '1.9.0',
+        version: '2.0.0',
         storageKey: 'twp_troop_summary_settings_v1'
     };
 
@@ -192,6 +192,44 @@
         return doc;
     }
 
+    function supportOverviewUrl(baseDoc) {
+        const links = Array.from((baseDoc || document).querySelectorAll('a[href*="screen=overview_villages"][href*="mode=units"]'));
+        const link = links.find(item => {
+            const label = String(item.textContent || '').toLowerCase().normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+            return /^(suporte|support|supports|supporting|apoio|apoios|apoyo|apoyos|soutien|renfort|rinforzo|rinforzi|wsparcie|podpora|sprijin|suport)$/.test(label);
+        });
+        if (link) {
+            const url = new URL(link.getAttribute('href'), location.origin);
+            url.searchParams.set('page', '-1');
+            url.searchParams.delete('group');
+            ['action', 'ajax', 'h'].forEach(key => url.searchParams.delete(key));
+            return url;
+        }
+        return overviewUrl('support');
+    }
+
+    async function fetchSupportOverview(baseDoc) {
+        const response = await fetch(supportOverviewUrl(baseDoc), { credentials: 'include', cache: 'no-store' });
+        if (!response.ok) throw new Error(`O jogo respondeu com HTTP ${response.status} ao ler os apoios.`);
+        const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+        if (doc.querySelector('#bot_check, .g-recaptcha')) throw new Error('O jogo pediu verificação. Conclui-a e volta a tentar.');
+        return doc;
+    }
+
+    function parseStationedOwnSupports(doc) {
+        const totals = emptyUnits();
+        const found = findTroopTable(doc);
+        if (!found) return totals;
+        directRows(found.table).filter(row => !row.querySelector('th')).forEach(row => {
+            const text = normalizedRowText(row);
+            if (isTotalRow(text) || /disponiveis|disponivel|available|desta aldeia|esta aldeia|own village|from this village/.test(text)) return;
+            if (!row.querySelector('input[type="checkbox"]')) return;
+            addUnits(totals, parseRowFromRight(row, found.columns));
+        });
+        return totals;
+    }
+
     function parseAwaySupports(doc) {
         const totals = emptyUnits();
         const found = findTroopTable(doc);
@@ -279,7 +317,12 @@
                     if (!totalScavenge) addUnits(out.scavenge, item.units);
                     return;
                 }
-                if (isSupportRow(item.text)) { addUnits(out.support, item.units); return; }
+                if (isSupportRow(item.text)) {
+                    const supportTransit = transitSection || hasCoordsText(item.text) ||
+                        /chegada|chega em|chega as|arrives?|arrival|return|regresso|retorno|a caminho|\b\d{1,2}:\d{2}:\d{2}\b/.test(item.text);
+                    if (supportTransit) addUnits(out.support, item.units);
+                    return;
+                }
                 if (isHomeRow(item.text)) { addUnits(out.home, item.units); return; }
                 const timedCommand = /chegada|chega em|chega as|arrives?|arrival|return|regresso|retorno|\b\d{1,2}:\d{2}:\d{2}\b/.test(item.text);
                 if (hasCoordsText(item.text) && (transitSection || timedCommand || /\b(comando|comandos|command|commands)\b/.test(item.text))) {
@@ -326,22 +369,19 @@
         return totals;
     }
 
-    function reconcileActivities(total, home, detected, supportDetected) {
+    function reconcileActivities(total, detected, stationedSupports) {
         const result = {
             home: emptyUnits(), scavenge: emptyUnits(), farm: emptyUnits(),
             support: emptyUnits(), transit: emptyUnits()
         };
         UNIT_KEYS.forEach(key => {
             const owned = Math.max(0, Number(total[key]) || 0);
-            result.home[key] = Math.min(owned, Math.max(0, Number(home[key]) || 0));
-            let remaining = owned - result.home[key];
-            result.support[key] = Math.min(remaining, Math.max(0, Number(supportDetected[key]) || 0));
-            remaining -= result.support[key];
-            result.scavenge[key] = Math.min(remaining, Math.max(0, Number(detected.scavenge[key]) || 0));
-            remaining -= result.scavenge[key];
-            result.farm[key] = Math.min(remaining, Math.max(0, Number(detected.farm[key]) || 0));
-            remaining -= result.farm[key];
-            result.transit[key] = remaining;
+            result.support[key] = Math.min(owned, Math.max(0,
+                Number(stationedSupports[key] || 0) + Number(detected.support[key] || 0)));
+            result.scavenge[key] = Math.min(owned, Math.max(0, Number(detected.scavenge[key]) || 0));
+            result.farm[key] = Math.min(owned, Math.max(0, Number(detected.farm[key]) || 0));
+            result.transit[key] = Math.max(0, Number(detected.transit[key]) || 0);
+            result.home[key] = Math.max(0, owned - result.support[key] - result.scavenge[key] - result.farm[key]);
         });
         return result;
     }
@@ -397,26 +437,26 @@
         state.progress = 'A carregar o resumo de tropas…';
         render();
         try {
-            const [completeDoc, awayDoc] = await Promise.all([fetchOverview('complete'), fetchOverview('away_detail')]);
+            const completeDoc = await fetchOverview('complete');
+            const [ownDoc, supportDoc] = await Promise.all([
+                fetchOverview('own').catch(() => null),
+                fetchSupportOverview(completeDoc)
+            ]);
             const villages = parseOverview(completeDoc);
             const totals = villages.reduce((sum, village) => addUnits(sum, village.units), emptyUnits());
-            const overviewSupport = parseAwaySupports(awayDoc);
+            let ownVillages = [];
+            if (ownDoc) {
+                try { ownVillages = parseOverview(ownDoc); }
+                catch (_) { ownVillages = []; }
+            }
+            const overviewSupport = parseStationedOwnSupports(supportDoc);
             const group = document.querySelector('#group_selection option:checked')?.textContent?.trim() || 'Todas';
             state.progress = `A analisar ${villages.length} Praças de Reuniões…`;
             render();
             const detected = await collectActivities(villages);
-            UNIT_KEYS.forEach(key => {
-                detected.support[key] = Number(overviewSupport[key] || 0);
-            });
-            const homeTotals = emptyUnits();
-            UNIT_KEYS.forEach(key => {
-                const away = (detected.scavenge[key] || 0) + (detected.farm[key] || 0) +
-                    (detected.transit[key] || 0) + (detected.support[key] || 0);
-                homeTotals[key] = Math.max(0, (totals[key] || 0) - away);
-            });
-            const activities = reconcileActivities(totals, homeTotals, detected, detected.support);
+            const activities = reconcileActivities(totals, detected, overviewSupport);
             state.summary = {
-                villages, totals, armies: classify(villages), group, generatedAt: new Date(),
+                villages, totals, armies: classify(ownVillages.length ? ownVillages : villages), group, generatedAt: new Date(),
                 activities,
                 expectedVillageCount: Number(window.game_data?.player?.villages) || villages.length
             };
@@ -448,7 +488,10 @@
             ['home', 'Prontas em casa'], ['scavenge', 'Em coleta'], ['farm', 'Assistente de Farm'],
             ['transit', 'Em trânsito'], ['support', 'Em apoios']
         ];
-        const accounted = rows.reduce((sum, [key]) => sum + unitCount(activities[key]), 0);
+        // Tal como no Alertas Discord, o disponível já inclui movimentos próprios
+        // que não sejam apoio, coleta ou farm. O trânsito é apenas informativo.
+        const accounted = ['home', 'scavenge', 'farm', 'support']
+            .reduce((sum, key) => sum + unitCount(activities[key]), 0);
         return rows.map(([key, label]) => {
             const totals = activities[key] || emptyUnits();
             const icons = DISPLAY_UNIT_KEYS.filter(unit => totals[unit] > 0)
